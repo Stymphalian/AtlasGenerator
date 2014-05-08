@@ -1,0 +1,918 @@
+#include "utils.h"
+#include <algorithm> // sort
+#include <vector> // vector
+
+binPacker::binPacker(){}
+binPacker::binPacker(int width, int height){
+	start(width, height);
+}
+binPacker::~binPacker(){
+	printf("destroying binPacker\n");
+	clear();
+}
+
+bool binPacker::canContain(binPartition& node, AABB& extent){
+	return (node.extent.w() >= extent.w() && node.extent.h() >= extent.h());
+}
+
+binPartition* binPacker::findBest(AABB& extent){
+	binPartition* chosen = NULL;
+
+	for(unsigned i = 0; i < partitions.size(); ++i){
+		if(canContain(partitions[i], extent)){
+			if(chosen == NULL){
+				chosen = &partitions[i];
+				continue;
+			}
+
+			if(partitions[i].extent.area() < chosen->extent.area()){
+				chosen = &partitions[i];
+			}
+		}
+	}	
+	return chosen;
+}
+bool binPacker::isWidthSmaller(AABB& extent){
+	return (extent.w() <= extent.h());
+}
+bool binPacker::isHeightSmaller(AABB& extent){
+	return !(extent.w() <= extent.h());
+}
+
+// only returns false on some 'error'
+// Mutable:
+// 1) modifies 'node'
+// 2) adds a new parition to 'partitions'
+bool binPacker::splitPartitionOnExtent(binPartition* node, AABB& extent){
+	AABB part;
+	part.min = node->extent.min;
+	part.max = node->extent.max;
+	
+
+	if(isWidthSmaller(extent)){
+		// add new 'free' partition			
+		part.min.y += extent.h();
+		part.max.x = extent.x() + extent.w();
+		//part.max.y += extent.h();
+		//part.max.x = extent.max.x;		
+
+		// shrink old parition
+		node->extent.min.x = extent.max.x;
+	} else {
+		// add new 'free' partition			
+		part.min.x += extent.w();
+		part.max.y = extent.y() + extent.h();
+		//part.max.x += extent.w();
+		//part.max.y = extent.max.y;		
+
+		// shrink old parition
+		node->extent.min.y = extent.max.y;
+	}
+
+	if(part.area() > 0){
+		partitions.push_back(binPartition(part.x(), part.y(), part.w(), part.h()));
+	}
+	return !(node->extent.area() < 0);
+}
+
+bool binPacker::place(rawTexture& t){
+	binPartition* best = findBest(t.extent);
+	if(best == NULL){ return false; }
+	
+	t.extent.set(
+		best->extent.x(),
+		best->extent.y(),
+		t.extent.w(),
+		t.extent.h()
+		);
+
+	if(splitPartitionOnExtent(best, t.extent) == false){
+		// remove the partition from the list.
+		std::vector<binPartition>::iterator it;
+		for(it = partitions.begin(); it != partitions.end(); it++){
+			if(&(*it) == best){
+				partitions.erase(it);
+				break;
+			}
+		}
+	}
+	return true;
+}
+
+
+std::string binPacker::getExtension(std::string file){
+	size_t pos = file.find_last_of('.');
+	if(pos == std::string::npos){ return ""; }
+	return file.substr(pos + 1);
+}
+
+bool binPacker::start(int width, int height){
+	srand((unsigned)time(NULL));
+	this->width = width;
+	this->height = height;	
+	partitions.push_back(binPartition(0, 0, width, height));
+	return true;
+}
+void binPacker::clear(){
+	printf("clearing binPacker\n");
+	imageList.clear();
+	partitions.clear();
+	width = 0;
+	height = 0;
+}
+
+bool binPacker::prepare_dimensions(){
+	for(unsigned i = 0; imageList.size(); ++i){
+		FILE* infile = fopen(imageList[i].filename.c_str(),"rb");
+		if(!infile){ return false; }
+
+		rawTexture* image = &imageList[i];		
+		if(image->setExtent(*image, infile) == false){
+			fclose(infile);
+			return false;
+		};
+
+		int w = image->extent.w();
+		int h = image->extent.h();
+		printf("addImage %s %5.2f %5.2f\n",
+			image->filename.c_str(), (float)w, (float)h);
+
+		fclose(infile);
+	}
+	return true;	
+}
+bool binPacker::addImage(std::string file){	
+	if(this->getExtension(file).compare("png") != 0){ return false; }
+	imageList.push_back(rawTexture());	
+	imageList.back().filename = file;
+	return true;
+}
+
+
+int texture_comp(const void* lhs, const void* rhs){
+	rawTexture* t1 = (rawTexture*)lhs;
+	rawTexture* t2 = (rawTexture*)rhs;
+	if(t1->extent.area() < t2->extent.area()){ return 1; }
+	if(t1->extent.area() == t2->extent.area()){ return 0; }
+	return -1;
+}
+
+bool binPacker::sortImageList(){
+	std::vector<rawTexture> temp_imageList;
+	rawTexture* txt_array = new rawTexture[imageList.size()];
+	for(unsigned i = 0; i < imageList.size(); ++i){
+		txt_array[i] = imageList[i];
+	}
+	std::qsort(txt_array, imageList.size(), sizeof(rawTexture), texture_comp);
+
+	for(unsigned i = 0; i < imageList.size(); ++i){
+		temp_imageList.push_back(txt_array[i]);
+	}
+	imageList.clear();
+	for(unsigned i = 0; i < temp_imageList.size(); ++i){
+		imageList.push_back(temp_imageList[i]);
+	}
+	temp_imageList.clear();
+	delete[] txt_array;
+	return true;
+}
+
+bool binPacker::prepare(){
+
+
+
+	// sort the shit? VS is either so fucker up OR I can't pass arugments correctly to std::sort
+	sortImageList();	
+
+	for(unsigned i = 0; i < imageList.size(); ++i){
+		if(!place(imageList[i])){
+			printf("Failed to place image %s\n", imageList[i].filename.c_str());
+			return false;
+		} else{
+			printf("%s %5.2f %5.2f %5.2f %5.2f %5.2f\n",
+				imageList[i].filename.c_str(),
+				(float) imageList[i].extent.area(),
+				(float) imageList[i].extent.x(),
+				(float) imageList[i].extent.y(),
+				(float) imageList[i].extent.w(),
+				(float) imageList[i].extent.h()
+				);
+		}
+	}
+	
+	return true;
+}
+
+bool binPacker::dump_atlas(std::string directory, std::string filename){
+	std::string output = directory + "/" + filename;
+	FILE* file = fopen(output.c_str(), "w");
+	if(!file){ return false; }
+
+	for(unsigned i = 0; i < imageList.size(); ++i){
+		fprintf(stdout, "%s %5.2f %5.2f %5.2f %5.2f\n",
+			imageList[i].filename.c_str(),
+			imageList[i].extent.x(),
+			imageList[i].extent.y(),
+			imageList[i].extent.w(),
+			imageList[i].extent.h()
+			);
+	}
+	
+	fclose(file);
+	return true;
+}
+
+bool binPacker::dump_png(std::string directory, std::string filename){
+	std::string output = directory + "/" + filename;
+	FILE* file = fopen(output.c_str(), "wb");
+	if(!file){ return false; }
+
+	// read all the image data
+	for(unsigned i = 0; i < imageList.size(); ++i){
+		FILE* fin = fopen(imageList[i].filename.c_str(), "rb");
+		if(!fin){
+			printf("loadTexture fopen failed (%s)\n", imageList[i].filename.c_str());
+			return false;
+		}
+		if(!imageList[i].loadTexture(imageList[i], fin)){
+			printf("loadTexture failure\n");
+			return false;
+		}
+
+		fclose(fin);
+	}
+
+
+	// write the image data
+	for(unsigned i = 0; i < imageList.size(); ++i){
+		
+	}
+
+	// dump out to file.
+
+	fclose(file);
+	return true;
+}
+
+
+#include "render.h"
+#include "utils.h" // binPackerzz
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+
+#include <SDL.h>
+#include <SDL_image.h>
+#include <SDL_ttf.h>
+#include <SDL_mixer.h>
+
+
+void render_rectangle(SDL_Renderer* ren, SDL_Rect* rect, SDL_Color color = { 0, 0, 0, 0 }){
+	Uint8 red, green, blue, alpha;
+	SDL_GetRenderDrawColor(ren, &red, &green, &blue, &alpha);
+	SDL_SetRenderDrawColor(ren, color.r, color.g, color.b, color.a);
+	if(SDL_RenderDrawRect(ren, rect) != 0){
+		printf("Error drawing rectangle\n");
+	}
+	SDL_SetRenderDrawColor(ren, red, green, blue, alpha);	
+}
+
+class Timer{
+public:
+	Uint32 interval;
+	Uint32 type;
+	int timer_id;
+	bool running;
+	Timer(Uint32 interval){
+		this->interval = interval;		
+		this->running = false;
+		this->timer_id = 0;
+
+		this->type = SDL_RegisterEvents(1);
+		if(this->type == ((Uint32)-1)){
+			printf("shit something went waayyy wrong\n");			
+		}
+	}
+	virtual ~Timer(){
+		stop();
+	}
+	void start(){
+		timer_id = SDL_AddTimer(interval, Timer::timer_callback, this);
+		if(timer_id == 0){ return; }
+		running = true;
+	}
+	void stop(){
+		if(running == false){ return; }
+		if(SDL_RemoveTimer(timer_id) == SDL_FALSE){
+			return;
+		}
+		timer_id = 0;
+		running = false;
+	}
+	static Uint32 timer_callback(Uint32 interval, void* t){
+		if(t == NULL){ return 0; }
+		Timer* self = (Timer*) t;
+		SDL_Event e;
+		SDL_zero(e);
+		e.type = self->type;
+		e.user.type = self->type;
+		e.user.code = 0;
+		e.user.data1 = t;
+		e.user.data2 = 0;
+		SDL_PushEvent(&e);
+		return interval;
+	}
+};
+
+render::render(){
+	printf("Constructor render\n");
+}
+render::~render(){
+	printf("Destroying render\n");
+}
+
+bool render::isKeyboardEvent(SDL_Event& e){
+	return (e.type == SDL_KEYDOWN ||
+		e.type == SDL_KEYUP ||
+		e.type == SDL_TEXTEDITING ||
+		e.type == SDL_TEXTINPUT);
+}
+bool render::isMouseEvent(SDL_Event& e){
+	return (e.type == SDL_MOUSEMOTION ||
+		e.type == SDL_MOUSEBUTTONDOWN ||
+		e.type == SDL_MOUSEBUTTONUP);
+}
+
+void render::run(binPacker& packer){
+	// variables
+	Timer timer(1000 / 30);
+	SDL_Renderer* ren;
+	SDL_Window* win;
+	int win_x = 400;
+	int win_y = 400;
+	int win_w = packer.width;
+	int win_h = packer.height;
+
+	// Create the window
+	Uint32 window_flags = SDL_WINDOW_SHOWN;
+	win = SDL_CreateWindow(
+		"binPackerTest",
+		win_x, win_y, win_w, win_h,
+		window_flags
+		);
+	if(win == NULL){
+		printf("Failed to create window\n");
+		return;
+	}
+
+	// create the renderer
+	Uint32 ren_flags = SDL_RENDERER_ACCELERATED;
+	ren_flags = SDL_RENDERER_PRESENTVSYNC;
+	ren = SDL_CreateRenderer(win, -1, ren_flags);		
+	if(ren == NULL){
+		SDL_DestroyWindow(win);
+		printf("Failed to create renderer\n");
+		return;
+	}
+
+	// main loop
+	SDL_Event e;
+	bool exit_flag = false;
+	bool draw_flag = false;
+	timer.start();
+	for(;;){
+		while(SDL_PollEvent(&e) && exit_flag == false){
+			if(e.type == SDL_QUIT){
+				exit_flag = true;
+			} else if(isKeyboardEvent(e)){				
+				const Uint8* keyboard = SDL_GetKeyboardState(NULL);
+				if(keyboard[SDL_SCANCODE_ESCAPE]){
+					SDL_Event ev;
+					SDL_zero(ev);
+					ev.type = SDL_QUIT;
+					ev.quit.type = SDL_QUIT;
+					ev.quit.timestamp = SDL_GetTicks();
+					SDL_PushEvent(&ev);					
+				}
+			} else if(isMouseEvent(e)){
+				// do nothing				
+			} else if(e.type >= SDL_USEREVENT){
+				if(e.user.type == timer.type){
+					draw_flag = true;
+				}
+				// do nothing
+			}			
+		}
+
+		if(exit_flag){ break; }
+		if(draw_flag){			
+			// draw the shit here.
+			SDL_RenderClear(ren);
+
+			SDL_Rect rect;
+			SDL_Color color = { 90, 90, 120, 140 };
+			for(unsigned i = 0; i < packer.imageList.size(); ++i){
+				rect.x = packer.imageList[i].extent.x();
+				rect.y = packer.imageList[i].extent.y();
+				rect.w = packer.imageList[i].extent.w();
+				rect.h = packer.imageList[i].extent.h();
+				render_rectangle(ren, &rect, color);
+			}
+			
+			SDL_RenderPresent(ren);
+		}
+	}
+
+	// destruction
+	timer.stop();
+	SDL_DestroyRenderer(ren);
+	SDL_DestroyWindow(win);
+}
+
+#pragma once
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <random>
+#include <list>
+#include <vector>
+#include <map>
+#include <setjmp.h>
+#include <algorithm>
+#include <iostream>
+#include <fstream>
+
+#include "png.h"
+#include "zlib.h"
+#include "render.h"
+
+class Vec2d{
+public:
+	int x, y;
+	Vec2d() : x(0), y(0){};
+	Vec2d(int x, int y) : x(x), y(y){};
+	Vec2d(const Vec2d& other){
+		this->x = other.x;
+		this->y = other.y;
+	}
+	virtual ~Vec2d(){};
+
+	Vec2d operator+(const Vec2d& rhs){
+		Vec2d v;
+		v.x = x + rhs.x;
+		v.y = y + rhs.y;
+		return v;
+	}
+	Vec2d operator-(const Vec2d& rhs){
+		Vec2d v;
+		v.x = x - rhs.x;
+		v.y = y - rhs.y;
+		return v;
+	}
+	Vec2d& operator=(const Vec2d& rhs){
+		this->x = rhs.x;
+		this->y = rhs.y;
+		return *this;
+	}
+	Vec2d& operator+=(const Vec2d& rhs){
+		this->x += rhs.x;
+		this->y += rhs.y;
+		return *this;
+	}
+	Vec2d& operator-=(const Vec2d& rhs){
+		this->x -= rhs.x;
+		this->y -= rhs.y;
+		return *this;
+	}
+};
+
+class AABB{
+public:
+	Vec2d min;
+	Vec2d max;
+	AABB(){
+		min.x = 0;
+		min.y = 0;
+		max.x = 0;
+		max.y = 0;
+	}
+	int x(){ return min.x; }
+	int y(){ return min.y; }
+	int w(){ return max.x - min.x; }
+	int h(){
+		int h = max.y - min.y;
+		return max.y - min.y;
+	}
+	int area(){ return (w()*h()); }
+	int perimiter(){ return 2 * (w() + h()); }
+
+	void set(int x, int y, int w, int h){
+		min.x = x;
+		min.y = y;
+		max.x = min.x + w;
+		max.y = min.y + h;
+	}
+};
+
+
+class rawTexture{	
+public:
+	enum { PNG_HEADER_SIZE = 8, PIXEL_SIZE = 4};	
+
+	AABB extent;
+	std::string filename;	
+	png_byte header[PNG_HEADER_SIZE];
+	png_byte *image_data;
+	png_structp png_ptr;
+	png_infop png_info;	
+
+	rawTexture(){
+		init(0, 0, 0, 0);
+	}
+	rawTexture(int x, int y, int w, int h){
+		init(x, y, w, h);
+	}	
+	rawTexture(const rawTexture& other){
+		this->filename = other.filename;
+		this->extent.set(
+			other.extent.min.x,
+			other.extent.min.y,
+			other.extent.max.x - other.extent.min.x,
+			other.extent.max.y - other.extent.min.y
+			);
+		memcpy(header, other.header, PNG_HEADER_SIZE*sizeof(png_byte));
+		png_ptr = other.png_ptr;
+		png_info = png_info;		
+	}
+
+	void init(int x, int y, int w, int h){
+		extent.set(x, y, w, h);
+		image_data = NULL;
+		memset(header, 0, PNG_HEADER_SIZE);
+		image_data = NULL;
+		png_ptr = NULL;
+		png_info = NULL;		
+	}
+
+	virtual ~rawTexture(){
+		//printf("destroying rawTexture\n");		
+		if(image_data != NULL){
+			delete image_data;
+		}
+	}
+	
+	bool operator< (const rawTexture& other){	
+		int area = other.extent.max.x - other.extent.min.x;
+		area *= other.extent.max.y - other.extent.min.y;
+		return (extent.area() >= area);
+	}
+	
+	static bool destroyPNG(rawTexture& t){
+		png_destroy_read_struct(&t.png_ptr, &t.png_info,(png_infopp)NULL);
+		t.png_ptr = NULL;
+		t.png_info = NULL;
+		return true;
+	}
+
+	static bool initPNG(rawTexture& t, FILE* file){
+		int x = fread(t.header, 1, PNG_HEADER_SIZE, file);
+		if(x == 0 ){
+			printf("fread hedaer 1 size\n");
+			return false;
+		}
+		if(png_sig_cmp(t.header, 0, PNG_HEADER_SIZE)){
+			printf("Error %s is not a png file\n", t.filename.c_str());
+			return false;
+		}
+
+		t.png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+		if(!t.png_ptr){
+			printf("Error png_create_read_struct\n");
+			return false;
+		}
+
+		t.png_info = png_create_info_struct(t.png_ptr);
+		//t.png_end = png_create_info_struct(t.png_ptr);
+		if(!t.png_info){
+			printf("Error png_create_info_struct\n");
+			rawTexture::destroyPNG(t);
+			return false;
+		}
+
+		return true;
+	}
+
+	static bool setExtent(rawTexture& t, FILE* file){
+		printf("setExtent begin\n");
+		if(!rawTexture::initPNG(t, file)){ return false; }
+
+		if(setjmp(png_jmpbuf(t.png_ptr))){
+			printf("Error, longjmp back to this point\n");
+			rawTexture::destroyPNG(t);
+			return false;
+		}
+
+		// DON'T DO ANY METHOD CALLS
+		png_init_io(t.png_ptr,file);
+		png_set_sig_bytes(t.png_ptr,PNG_HEADER_SIZE);
+		png_read_info(t.png_ptr, t.png_info);
+
+		int width = png_get_image_width(t.png_ptr, t.png_info);
+		int height = png_get_image_height(t.png_ptr, t.png_info);		
+		t.extent.set(0, 0, width, height);
+
+		rawTexture::destroyPNG(t);
+		printf("setExtent end\n");
+		return true;
+	}
+
+	static bool loadTexture(rawTexture& t,FILE* file){		
+		png_bytep* rowPtrs;
+		if(rawTexture::initPNG(t, file) == false) {return false;};
+
+		if(setjmp(png_jmpbuf(t.png_ptr))){
+			printf("Error, longjmp back to this point\n");
+			rawTexture::destroyPNG(t);
+			delete[] rowPtrs;
+			delete[] t.image_data;
+			t.image_data = NULL;
+			return false;
+		}
+
+		// DON'T DO ANY METHOD CALLS, or the longjmp will fuck with you.
+		int width = png_get_image_width(t.png_ptr, t.png_info);
+		int height = png_get_image_height(t.png_ptr, t.png_info);
+		int bitDepth = png_get_bit_depth(t.png_ptr, t.png_info);
+		int colorType = png_get_color_type(t.png_ptr, t.png_info);
+
+		// standardize 
+		// we want a true-color + alpha, 4 bytes per pixel image.
+		switch(colorType){
+		case(PNG_COLOR_TYPE_RGB) :
+			png_set_add_alpha(t.png_ptr, 0xff, PNG_FILLER_AFTER);
+			colorType = PNG_COLOR_TYPE_RGB_ALPHA;
+			break;
+		case(PNG_COLOR_TYPE_PALETTE) :
+			png_set_palette_to_rgb(t.png_ptr);
+			break;
+		case(PNG_COLOR_TYPE_GRAY):
+			if(bitDepth < 8){
+				png_set_expand_gray_1_2_4_to_8(t.png_ptr);
+				bitDepth = 8;
+			}
+			break;
+		}
+		// if the tRNS chuck is deteted, then make sure that
+		// we use it as an alpha channel.
+		if(png_get_valid(t.png_ptr,t.png_info, PNG_INFO_tRNS)){
+			png_set_tRNS_to_alpha(t.png_ptr);
+		}
+		// can't handle 16bits/channel, convert to 8bits/channel
+		if(bitDepth == 16){
+			png_set_strip_16(t.png_ptr);
+		}
+		png_read_update_info(t.png_ptr, t.png_info);
+
+
+		// Read in the image.
+		const unsigned stride = width*PIXEL_SIZE;
+		rowPtrs = new png_bytep[height];		
+		t.image_data = new png_byte[stride*height];
+
+		for(int i = 0; i < height; i++){
+			rowPtrs[i] =  (png_bytep) (t.image_data + (height - i - 1)*stride);
+		}
+		png_read_image(t.png_ptr, rowPtrs);
+
+
+		delete[] rowPtrs;
+		rawTexture::destroyPNG(t);
+		return true;
+	}	
+};
+
+
+class binPartition{
+public:
+	AABB extent;	
+	binPartition(){
+		extent.set(0,0,0,0);
+	}
+	binPartition(int x, int y, int w, int h){
+		extent.set(x, y, w, h);
+	}
+	virtual ~binPartition(){
+		//printf("Destroying binPartition\n");
+	}
+private:
+
+};
+
+
+class binPacker{
+private:
+	inline bool isWidthSmaller(AABB& extent);
+	inline bool isHeightSmaller(AABB& extent);
+	bool canContain(binPartition& node, AABB& extent);
+	binPartition* findBest(AABB& extent);
+	bool splitPartitionOnExtent(binPartition* node, AABB& extent);
+	bool place(rawTexture& tex);
+	std::string getExtension(std::string file);
+	bool sortImageList();
+	
+public:
+	int width, height;
+	std::vector<rawTexture> imageList;
+	std::vector<binPartition> partitions;
+
+	binPacker();
+	binPacker(int width, int height);
+	virtual ~binPacker();
+
+	bool start(int width, int height);
+	void clear();
+	bool addImage(std::string file);
+	bool prepare_dimensions();
+	bool prepare();
+	bool dump_atlas(std::string directory, std::string filename);
+	bool dump_png	(std::string directory, std::string filename);
+};
+
+class AtlasGen{
+public:
+	//constructor and destructor
+	AtlasGen(){};
+	virtual ~AtlasGen(){};
+
+	//methods
+	std::map<std::string, std::string>* parse_arguments(int argc, char** argv){
+		static char* required[3] = {
+			"inputfile",
+			"width",
+			"height",
+		};
+		static char* optional[3] = {
+			"outputDirectory",
+			"atlasfilename",
+			"pngfilename"
+		};
+		std::map<std::string, std::string>* map = new std::map<std::string, std::string>;
+
+		// check for arguments
+		if(argc <= 1){ return NULL; }
+
+		// iterate through all the possible arguments and add them to the hash map
+		// argument format  -<arg_name>=<arg_value>
+		size_t temp_pivot;
+		std::string temp;
+
+		std::string name;
+		std::string value;
+		for(int i = 0; i < argc; i++){
+			temp = argv[i];
+
+			// make sure that it has a valid format..
+			temp_pivot = temp.find_first_of('=');
+			if(temp_pivot == std::string::npos){
+				continue;
+			}
+
+			// add the key-value pair
+			name = temp.substr(0, temp_pivot);
+			value = temp.substr(temp_pivot + 1);
+			(*map)[name] = value;
+		}
+
+		// check for required parameters		
+		for(int i = 0; i < 3; ++i){
+			if(map->find(required[i]) == map->end()){
+				delete map;
+				return NULL;
+			}
+		}
+
+		// defaults for some arugments.
+		if(map->find("outputDirectory") == map->end()){
+			(*map)["outputDirectory"] = "./";
+		}
+		if(map->find("atlasfilename") == map->end()){
+			(*map)["atlasfilename"] = "out.atlas";
+		}
+		if(map->find("pngfilename") == map->end()){
+			(*map)["pngfilename"] = "out.png";
+		}
+
+		std::map<std::string, std::string>::iterator it;
+		for(it = map->begin(); it != map->end(); ++it){
+			printf("%s --> %s\n", it->first.c_str(), it->second.c_str());
+		}
+
+		return map;
+	}
+
+	void print_usage(char* program_name){
+		if(program_name == NULL){
+			program_name = "program name";
+		}
+		printf("Usage: %s\n", program_name);
+
+		std::string usage_str;
+		usage_str += "\t inputfile=<filename>  [required]\n";
+		usage_str += "\t width=<pixels> [required]\n";
+		usage_str += "\t height=<pixels> [reqiured]\n";
+		usage_str += "\t outputDirectory=<directory> [default = \"./\"]\n";
+		usage_str += "\t atlasfilename=<filename> [default = out.atlas]\n";
+		usage_str += "\t pngfilename=<filename> [default = out.png]\n";
+		printf("%s", usage_str.c_str());
+
+		// pause...
+		char c;
+		scanf("%c", &c);
+	}
+
+	void run(std::map<std::string, std::string>& params){
+		int width = atoi(params["width"].c_str());
+		int height = atoi(params["height"].c_str());
+		binPacker packer(width, height);
+
+		// read in all the png files that we need.
+		std::string line;
+		std::ifstream infile(params["inputfile"]);
+		if(!infile.is_open()){
+			printf("Unable to open file [%s]\n", params["inputfile"].c_str());
+			return;
+		}
+
+		while(getline(infile, line)){
+			packer.addImage(line);
+		}
+		infile.close();
+
+		// dump the atlas to external files..
+		packer.prepare();
+		packer.dump_atlas(params["outputDirectory"], params["atlasfilename"]);
+		packer.dump_png(params["outputDirectory"], params["pngfilename"]);
+	}
+	
+	void test(std::map < std::string, std::string>& params){
+		printf("----------------\n");
+		printf("Atlas test\n");
+		int width = atoi(params["width"].c_str());
+		int height = atoi(params["height"].c_str());
+		binPacker packer(width, height);
+
+		std::string line;
+		std::ifstream infile(params["inputfile"]);
+		if(!infile.is_open()){
+			printf("Unable to open file [%s]\n", params["inputfile"].c_str());
+			return;
+		}
+
+		printf("Reading file %s\n", params["inputfile"].c_str());
+		while(getline(infile, line)){
+			printf("read in line %s\n", line.c_str());
+			packer.addImage(line);
+		}
+		infile.close();
+
+		packer.prepare_dimensions();
+		packer.prepare();
+		packer.dump_atlas(params["outputDirectory"], params["atalasfilename"]);
+		packer.dump_png(params["outputDirectory"], params["pngfilename"]);
+		
+		render r;
+		r.run(packer);
+	}
+private:
+};
+
+/*
+Usage:
+inputfile=								[required]
+width=number							[required]
+height=number							[reqiured]
+outputDirectory=outputDirectory	[default=./output]
+atlasfilename=out.atlas				[default=out.atlas]
+pngfilename=out.png					[default=out.png]
+*/
+
+
+
+#pragma once
+#include <SDL.h> // SDL_Event
+
+class binPacker;
+class render{
+public:
+	bool good;
+	render();
+	virtual ~render();
+
+	bool isKeyboardEvent(SDL_Event& e);
+	bool isMouseEvent(SDL_Event& e);
+	void run(binPacker& packer);
+private:
+};
